@@ -28,6 +28,7 @@ This is a debug command that logs some data server side.  Mostly just there to g
 
 ### ConVars
 <hr>
+
 **eotl_ignore_debug [0/1]**
 
 Enable additional debug logging.
