@@ -9,7 +9,8 @@ Each client has their own list of ignored players.  Individual client configs ar
 ### Dependencies
 <hr>
 
-Make sure ```sourcemod/config/eotl_ignore/``` directory exists
+  * simple-chatprocessor redux plugin (eotl bugfix version located [here](https://github.com/jwestfall69/eotl_simple-chatprocessor))
+  * Make sure ```sourcemod/config/eotl_ignore/``` directory exists
 
 ### Say Commands
 <hr>

@@ -3,9 +3,10 @@
 
 #include <sourcemod>
 #include <sdktools>
+#include <scp>
 
 #define PLUGIN_AUTHOR         "ack"
-#define PLUGIN_VERSION        "0.5"
+#define PLUGIN_VERSION        "0.6"
 
 #define CONFIG_PATH           "configs/eotl_ignore/"
 
@@ -22,7 +23,8 @@ public Plugin myinfo = {
 enum struct PlayerState {
     bool isPreAuth;         // when a client is connected, but steam id isn't auth'd yet
     bool hasIgnores;
-    StringMap ignores;
+    bool ignoredClients[MAXPLAYERS + 1];
+    StringMap ignoredSteamIDs;
     char steamID[STEAMID_LENGTH];
 }
 
@@ -37,7 +39,10 @@ public void OnPluginStart() {
     g_cvDebug = CreateConVar("eotl_ignore_debug", "0", "0/1 enable debug output", FCVAR_NONE, true, 0.0, true, 1.0);
 
     for(int client = 1;client <= MaxClients; client++) {
-        g_playerStates[client].ignores = CreateTrie();
+        g_playerStates[client].ignoredSteamIDs = CreateTrie();
+        for(int ignore = 1;ignore <= MaxClients; ignore++) {
+            g_playerStates[client].ignoredClients[ignore] = false;
+        }
     }
 
     BuildPath(Path_SM, g_configPath, sizeof(g_configPath), "%s", CONFIG_PATH);
@@ -51,13 +56,55 @@ public void OnMapStart() {
         g_playerStates[client].isPreAuth = true;
         g_playerStates[client].hasIgnores = false;
         g_playerStates[client].steamID[0] = '\0';
-        ClearTrie(g_playerStates[client].ignores);
+        ClearTrie(g_playerStates[client].ignoredSteamIDs);
+        for(int ignore = 1;ignore <= MaxClients; ignore++) {
+            g_playerStates[client].ignoredClients[ignore] = false;
+        }
     }
 }
 
 // debug if OnClientAuthorized sometimes doesnt fire
 public void OnClientConnected(int client) {
     CreateTimer(30.0, PreAuthTimeout, client);
+}
+
+public Action OnChatMessage(int &author, ArrayList targets, char[] name, char[] message) {
+    bool needUpdate = false;
+
+    if(!IsValidClient(author)) {
+        return Plugin_Continue;
+    }
+
+    //LogMessage("%s: %s %d (%d %N)", name, message, targets.Length, targets.Get(0), targets.Get(0));
+    for(int index = targets.Length - 1; index >= 0; index--) {
+        int target = targets.Get(index);
+        if(!IsValidClient(target)) {
+            continue;
+        }
+
+        if(!g_playerStates[target].hasIgnores) {
+            continue;
+        }
+
+        if(!g_playerStates[target].ignoredClients[author]) {
+            continue;
+        }
+
+        targets.Erase(index);
+        LogDebug("Dropping message from %N to %N", author, target);
+        needUpdate = true;
+    }
+
+    // no targets left, drop the message
+    if(targets.Length == 0) {
+        return Plugin_Handled;
+    }
+
+    if(needUpdate) {
+        return Plugin_Changed;
+    }
+
+    return Plugin_Continue;
 }
 
 public Action PreAuthTimeout(Handle timer, int client) {
@@ -103,12 +150,13 @@ public void OnClientAuthorized(int client, const char[] auth) {
                 continue;
             }
 
-            if(!g_playerStates[client].ignores.ContainsKey(g_playerStates[target].steamID)) {
+            if(!g_playerStates[client].ignoredSteamIDs.ContainsKey(g_playerStates[target].steamID)) {
                 continue;
             }
 
             LogDebug("%N (%s) is on %N's (%s) ignore list, blocking voice", target, g_playerStates[target].steamID, client, g_playerStates[client].steamID);
             SetListenOverride(client, target, Listen_No);
+            g_playerStates[client].ignoredClients[target] = true;
         }
     }
 
@@ -128,12 +176,13 @@ public void OnClientAuthorized(int client, const char[] auth) {
             continue;
         }
 
-        if(!g_playerStates[other].ignores.ContainsKey(g_playerStates[client].steamID)) {
+        if(!g_playerStates[other].ignoredSteamIDs.ContainsKey(g_playerStates[client].steamID)) {
             continue;
         }
 
         LogDebug("%N (%s) is on %N's (%s) ignore list, blocking voice", client, g_playerStates[client].steamID, other, g_playerStates[other].steamID);
         SetListenOverride(other, client, Listen_No);
+        g_playerStates[other].ignoredClients[client] = true;
     }
 }
 
@@ -141,7 +190,10 @@ public void OnClientDisconnect(int client) {
     g_playerStates[client].isPreAuth = true;
     g_playerStates[client].hasIgnores = false;
     g_playerStates[client].steamID[0] = '\0';
-    ClearTrie(g_playerStates[client].ignores);
+    ClearTrie(g_playerStates[client].ignoredSteamIDs);
+    for(int ignore = 1;ignore <= MaxClients; ignore++) {
+        g_playerStates[client].ignoredClients[ignore] = false;
+    }
 }
 
 public Action CommandIgnore(int client, int args) {
@@ -152,32 +204,11 @@ public Action CommandIgnore(int client, int args) {
         if(StrEqual(arg1, "clear")) {
             ClearClientIgnores(client);
             return Plugin_Continue;
-        } else if(StrEqual(arg1, "acktest")) {
-            AckTest(client);
-            return Plugin_Continue;
         }
     }
 
     MenuIgnore(client);
     return Plugin_Continue;
-}
-
-void AckTest(int client) {
-
-    LogDebug("AckTest for %N (%s)", client, g_playerStates[client].steamID);
-
-    for(int target = 1; target <= MaxClients; target++) {
-
-        if(!IsValidTarget(client, target)) {
-            continue;
-        }
-
-        if(IsClientMuted(client, target)) {
-            LogDebug("  Muted: %N (%s)", target, (g_playerStates[client].isPreAuth ? "PREAUTH" : g_playerStates[client].steamID));
-        } else {
-            LogDebug("  Not Muted: %N (%s)", target, (g_playerStates[client].isPreAuth ? "PREAUTH" : g_playerStates[client].steamID));
-        }
-    }
 }
 
 void MenuIgnore(int client) {
@@ -200,7 +231,7 @@ void MenuIgnore(int client) {
         Format(targetId, sizeof(targetId), "%d", GetClientUserId(target));
         GetClientName(target, targetName, sizeof(targetName));
 
-        if(g_playerStates[client].hasIgnores && g_playerStates[client].ignores.ContainsKey(g_playerStates[target].steamID)) {
+        if(g_playerStates[client].hasIgnores && g_playerStates[client].ignoredSteamIDs.ContainsKey(g_playerStates[target].steamID)) {
             StrCat(targetName, sizeof(targetName), " (ignored)");
         }
 
@@ -239,7 +270,7 @@ int HandleMenuIgnoreInput(Menu menu, MenuAction action, int client, int itemNum)
         return 0;
     }
 
-    if(g_playerStates[client].ignores.ContainsKey(g_playerStates[target].steamID)) {
+    if(g_playerStates[client].ignoredSteamIDs.ContainsKey(g_playerStates[target].steamID)) {
         RemoveClientIgnore(client, target);
     } else {
         AddClientIgnore(client, target);
@@ -255,14 +286,15 @@ void ClearClientIgnores(int client) {
         return;
     }
 
-    Handle snap = CreateTrieSnapshot(g_playerStates[client].ignores);
+    Handle snap = CreateTrieSnapshot(g_playerStates[client].ignoredSteamIDs);
     int trieSize = TrieSnapshotLength(snap);
     CloseHandle(snap);
 
-    ClearTrie(g_playerStates[client].ignores);
+    ClearTrie(g_playerStates[client].ignoredSteamIDs);
 
     // now blindly reset every client to default for them
     for(int target = 1; target <= MaxClients; target++) {
+        g_playerStates[client].ignoredClients[target] = false;
 
         if(!IsValidTarget(client, target)) {
             continue;
@@ -282,10 +314,11 @@ void ClearClientIgnores(int client) {
 
 void AddClientIgnore(int client, int target) {
 
-    SetTrieValue(g_playerStates[client].ignores, g_playerStates[target].steamID, 1);
+    SetTrieValue(g_playerStates[client].ignoredSteamIDs, g_playerStates[target].steamID, 1);
     g_playerStates[client].hasIgnores = true;
 
     SetListenOverride(client, target, Listen_No);
+    g_playerStates[client].ignoredClients[target] = true;
 
     if(!SaveClientIgnores(client)) {
         PrintToChat(client, "There was an error saving %N to your voice ignore list config", target);
@@ -298,9 +331,9 @@ void AddClientIgnore(int client, int target) {
 
 void RemoveClientIgnore(int client, int target) {
 
-    RemoveFromTrie(g_playerStates[client].ignores, g_playerStates[target].steamID);
+    RemoveFromTrie(g_playerStates[client].ignoredSteamIDs, g_playerStates[target].steamID);
 
-    Handle snap = CreateTrieSnapshot(g_playerStates[client].ignores);
+    Handle snap = CreateTrieSnapshot(g_playerStates[client].ignoredSteamIDs);
     int trieSize = TrieSnapshotLength(snap);
     CloseHandle(snap);
 
@@ -309,6 +342,7 @@ void RemoveClientIgnore(int client, int target) {
     }
 
     SetListenOverride(client, target, Listen_Default);
+    g_playerStates[client].ignoredClients[target] = false;
 
     if(!SaveClientIgnores(client)) {
         PrintToChat(client, "There was an error saving %N to your voice ignore list config", target);
@@ -354,7 +388,7 @@ bool LoadClientIgnores(int client) {
         }
 
         LogDebug("  Added %s to voice ignore list", line);
-        SetTrieValue(g_playerStates[client].ignores, line, 1);
+        SetTrieValue(g_playerStates[client].ignoredSteamIDs, line, 1);
         count++;
     }
     CloseHandle(cfgFd);
@@ -382,7 +416,7 @@ bool SaveClientIgnores(int client) {
     Format(clientConfigFileReal, PLATFORM_MAX_PATH, "%s%s.cfg", g_configPath, steamID64);
     Format(clientConfigFileTemp, PLATFORM_MAX_PATH, "%s%s.cfg.temp", g_configPath, steamID64);
 
-    Handle snap = CreateTrieSnapshot(g_playerStates[client].ignores);
+    Handle snap = CreateTrieSnapshot(g_playerStates[client].ignoredSteamIDs);
     int trieSize = TrieSnapshotLength(snap);
 
     if(trieSize == 0) {
@@ -442,6 +476,25 @@ bool IsValidTarget(int client, int target) {
         return false;
     }
 
+    return true;
+}
+
+bool IsValidClient(int client) {
+    if(client <= 0 && client > MaxClients) {
+        return false;
+    }
+
+    if(IsFakeClient(client)) {
+        return false;
+    }
+
+    if(!IsClientConnected(client)) {
+        return false;
+    }
+
+    if(!IsClientInGame(client)) {
+        return false;
+    }
     return true;
 }
 
